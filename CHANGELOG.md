@@ -14,6 +14,8 @@ Repo: https://github.com/openclaw/acpx
 
 ### Fixes
 
+- ACP/terminal: isolate terminal callback environment from adapter credentials and credential homes, reject secret/home overrides, and reject callback working directories outside `--cwd`.
+
 ## 2026.7.27 (v0.13.0)
 
 ### Highlights

@@ -85,6 +85,7 @@ import {
 } from "./agent-command.js";
 import {
   buildAgentSpawnOptions,
+  buildTerminalEnvironment,
   readEnvCredential,
   resolveConfiguredAuthCredential,
 } from "./auth-env.js";
@@ -472,6 +473,7 @@ export class AcpClient {
     });
     this.terminalManager = new TerminalManager({
       cwd: this.options.cwd,
+      environment: buildTerminalEnvironment(),
       permissionMode: this.options.permissionMode,
       nonInteractivePermissions: this.options.nonInteractivePermissions,
       onOperation: (operation) => {

@@ -87,7 +87,9 @@ If at least one request was approved (auto or explicit), exit code is whatever t
 
 ## Sandboxing with `--cwd`
 
-`--cwd <dir>` sets the working directory the agent operates in. The ACP `fs/*` and `terminal/*` client methods that `acpx` implements honor cwd boundaries — adapters cannot escape that directory through `fs/read_text_file` or terminal calls routed through the client.
+`--cwd <dir>` sets the working directory the agent operates in. ACP terminal callbacks resolve their requested working directory canonically and reject paths outside this root, including paths that escape through symlinks. Terminal callbacks also receive an isolated home/config/cache environment rather than the adapter's credential environment.
+
+This is a boundary for the callback's working directory and environment; it is not a general operating-system sandbox. Use `--no-terminal` when the agent must not execute terminal commands at all.
 
 ```bash
 acpx --cwd ~/repos/api --approve-all codex 'fix everything you find'

@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { resolveClaudeCodeExecutable } from "../src/acp/agent-command.js";
+import { buildTerminalEnvironment } from "../src/acp/auth-env.js";
 import { resolveAgentSessionCwd } from "../src/acp/client-process.js";
 import { buildAgentSpawnOptions, buildSpawnCommandOptions } from "../src/acp/client.js";
 import { buildTerminalSpawnOptions } from "../src/acp/terminal-manager.js";
@@ -222,6 +223,45 @@ test("buildAgentSpawnOptions promotes explicit ACPX auth env vars into agent aut
     }
   }
 });
+
+test("terminal environment excludes provider credentials while adapter environment retains them", () => {
+  const previousPrefixed = process.env.ACPX_AUTH_OPENAI_API_KEY;
+  const previousRaw = process.env.OPENAI_API_KEY;
+  const previousCodexHome = process.env.CODEX_HOME;
+  const previousClaudeToken = process.env.CLAUDE_CODE_OAUTH_TOKEN;
+  const previousHome = process.env.HOME;
+
+  process.env.ACPX_AUTH_OPENAI_API_KEY = "adapter-secret";
+  process.env.OPENAI_API_KEY = "adapter-secret";
+  process.env.CODEX_HOME = "/private/codex";
+  process.env.CLAUDE_CODE_OAUTH_TOKEN = "claude-secret";
+
+  try {
+    const adapter = buildAgentSpawnOptions("/tmp/acpx-agent", undefined);
+    const terminal = buildTerminalEnvironment();
+
+    assert.equal(adapter.env.OPENAI_API_KEY, "adapter-secret");
+    assert.equal(adapter.env.ACPX_AUTH_OPENAI_API_KEY, "adapter-secret");
+    assert.equal(terminal.OPENAI_API_KEY, undefined);
+    assert.equal(terminal.ACPX_AUTH_OPENAI_API_KEY, undefined);
+    assert.equal(terminal.CODEX_HOME, undefined);
+    assert.equal(terminal.CLAUDE_CODE_OAUTH_TOKEN, undefined);
+    assert.notEqual(terminal.HOME, previousHome);
+  } finally {
+    restoreEnv("ACPX_AUTH_OPENAI_API_KEY", previousPrefixed);
+    restoreEnv("OPENAI_API_KEY", previousRaw);
+    restoreEnv("CODEX_HOME", previousCodexHome);
+    restoreEnv("CLAUDE_CODE_OAUTH_TOKEN", previousClaudeToken);
+  }
+});
+
+function restoreEnv(key: string, value: string | undefined): void {
+  if (value == null) {
+    delete process.env[key];
+  } else {
+    process.env[key] = value;
+  }
+}
 
 test("buildTerminalSpawnOptions hides Windows console windows and maps env entries", () => {
   const options = buildTerminalSpawnOptions("node", "/tmp/acpx-terminal", [

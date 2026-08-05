@@ -3,6 +3,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { buildTerminalEnvironment } from "../src/acp/auth-env.js";
 import { TerminalManager } from "../src/acp/terminal-manager.js";
 import { PermissionPromptUnavailableError } from "../src/errors.js";
 
@@ -734,6 +735,78 @@ test("terminal manager fails when prompt is unavailable and policy is fail", asy
         args: ["-e", "console.log('blocked')"],
       }),
       PermissionPromptUnavailableError,
+    );
+  } finally {
+    await fs.rm(tmp, { recursive: true, force: true });
+  }
+});
+
+test("terminal callback process receives isolated environment and rejects sensitive overrides", async () => {
+  const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "acpx-terminal-test-"));
+  const previousToken = process.env.OPENAI_API_KEY;
+  const previousCodexHome = process.env.CODEX_HOME;
+  process.env.OPENAI_API_KEY = "provider-secret";
+  process.env.CODEX_HOME = "/private/codex";
+  try {
+    const manager = new TerminalManager({
+      cwd: tmp,
+      environment: buildTerminalEnvironment(),
+      permissionMode: "approve-all",
+    });
+    const created = await manager.createTerminal({
+      sessionId: "session-1",
+      command: process.execPath,
+      args: [
+        "-e",
+        "console.log(JSON.stringify({ token: process.env.OPENAI_API_KEY, codexHome: process.env.CODEX_HOME, home: process.env.HOME, configHome: process.env.XDG_CONFIG_HOME, safe: process.env.SAFE }))",
+      ],
+      env: [
+        { name: "OPENAI_API_KEY", value: "callback-secret" },
+        { name: "CODEX_HOME", value: "/private/override" },
+        { name: "HOME", value: "/private/home" },
+        { name: "XDG_CONFIG_HOME", value: "/private/config" },
+        { name: "SAFE", value: "accepted" },
+      ],
+    });
+    await manager.waitForTerminalExit({ sessionId: "session-1", terminalId: created.terminalId });
+    const output = await manager.terminalOutput({
+      sessionId: "session-1",
+      terminalId: created.terminalId,
+    });
+    const observed = JSON.parse(output.output) as Record<string, string | undefined>;
+
+    assert.equal(observed.token, undefined);
+    assert.equal(observed.codexHome, undefined);
+    assert.notEqual(observed.home, "/private/home");
+    assert.notEqual(observed.configHome, "/private/config");
+    assert.equal(observed.safe, "accepted");
+  } finally {
+    if (previousToken == null) {
+      delete process.env.OPENAI_API_KEY;
+    } else {
+      process.env.OPENAI_API_KEY = previousToken;
+    }
+    if (previousCodexHome == null) {
+      delete process.env.CODEX_HOME;
+    } else {
+      process.env.CODEX_HOME = previousCodexHome;
+    }
+    await fs.rm(tmp, { recursive: true, force: true });
+  }
+});
+
+test("terminal callback cwd cannot escape configured workspace", async () => {
+  const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "acpx-terminal-test-"));
+  try {
+    const manager = new TerminalManager({ cwd: tmp, permissionMode: "approve-all" });
+    await assert.rejects(
+      manager.createTerminal({
+        sessionId: "session-1",
+        command: process.execPath,
+        args: ["-e", "console.log('blocked')"],
+        cwd: os.tmpdir(),
+      }),
+      /cwd must stay within the configured workspace/,
     );
   } finally {
     await fs.rm(tmp, { recursive: true, force: true });

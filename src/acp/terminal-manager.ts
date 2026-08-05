@@ -24,6 +24,7 @@ import {
   type TerminalSpawnCommand,
 } from "../spawn-command-options.js";
 import type { ClientOperation, NonInteractivePermissionPolicy, PermissionMode } from "../types.js";
+import { buildTerminalEnvironment, isAllowedTerminalEnvironmentOverride } from "./auth-env.js";
 
 const DEFAULT_TERMINAL_OUTPUT_LIMIT_BYTES = 64 * 1024;
 const DEFAULT_KILL_GRACE_MS = 1_500;
@@ -44,6 +45,7 @@ type ManagedTerminal = {
 
 export type TerminalManagerOptions = {
   cwd: string;
+  environment?: NodeJS.ProcessEnv;
   permissionMode: PermissionMode;
   nonInteractivePermissions?: NonInteractivePermissionPolicy;
   onOperation?: (operation: ClientOperation) => void;
@@ -69,13 +71,18 @@ function toCommandLine(command: string, args: string[] | undefined): string {
   return renderedArgs.length > 0 ? `${command} ${renderedArgs}` : command;
 }
 
-function toEnvObject(env: CreateTerminalRequest["env"]): NodeJS.ProcessEnv | undefined {
+function toEnvObject(
+  baseEnvironment: NodeJS.ProcessEnv,
+  env: CreateTerminalRequest["env"],
+): NodeJS.ProcessEnv {
+  const merged: NodeJS.ProcessEnv = { ...baseEnvironment };
   if (!env || env.length === 0) {
-    return undefined;
+    return merged;
   }
-
-  const merged: NodeJS.ProcessEnv = { ...process.env };
   for (const entry of env) {
+    if (!isAllowedTerminalEnvironmentOverride(entry.name)) {
+      continue;
+    }
     merged[entry.name] = entry.value;
   }
   return merged;
@@ -86,20 +93,16 @@ export function buildTerminalSpawnOptions(
   cwd: string,
   env: CreateTerminalRequest["env"],
   platform: NodeJS.Platform = process.platform,
+  baseEnvironment: NodeJS.ProcessEnv = buildTerminalEnvironment(),
 ): TerminalSpawnOptions {
-  const resolvedEnv = toEnvObject(env);
+  const resolvedEnv = toEnvObject(baseEnvironment, env);
   const options: TerminalSpawnOptions = {
     cwd,
     env: resolvedEnv,
     stdio: ["ignore", "pipe", "pipe"],
     windowsHide: true,
   };
-  return buildSpawnCommandOptions(
-    command,
-    options,
-    platform,
-    resolvedEnv ?? process.env,
-  ) as TerminalSpawnOptions;
+  return buildSpawnCommandOptions(command, options, platform, resolvedEnv) as TerminalSpawnOptions;
 }
 
 function trimToUtf8Boundary(buffer: Buffer, limit: number): Buffer {
@@ -155,6 +158,7 @@ function waitMs(ms: number): Promise<void> {
 
 export class TerminalManager {
   private readonly cwd: string;
+  private readonly environment: NodeJS.ProcessEnv;
   private permissionMode: PermissionMode;
   private nonInteractivePermissions: NonInteractivePermissionPolicy;
   private readonly onOperation?: (operation: ClientOperation) => void;
@@ -165,6 +169,7 @@ export class TerminalManager {
 
   constructor(options: TerminalManagerOptions) {
     this.cwd = options.cwd;
+    this.environment = { ...(options.environment ?? buildTerminalEnvironment()) };
     this.permissionMode = options.permissionMode;
     this.nonInteractivePermissions = options.nonInteractivePermissions ?? "deny";
     this.onOperation = options.onOperation;
@@ -201,7 +206,7 @@ export class TerminalManager {
         0,
         Math.round(params.outputByteLimit ?? DEFAULT_TERMINAL_OUTPUT_LIMIT_BYTES),
       );
-      const { proc, spawnCommand } = await spawnTerminalProcess(params, this.cwd);
+      const { proc, spawnCommand } = await spawnTerminalProcess(params, this.cwd, this.environment);
 
       let resolveExit: (response: WaitForTerminalExitResponse) => void = () => {};
       const exitPromise = new Promise<WaitForTerminalExitResponse>((resolve) => {
@@ -539,6 +544,7 @@ export class TerminalManager {
 async function spawnTerminalProcess(
   params: CreateTerminalRequest,
   defaultCwd: string,
+  environment: NodeJS.ProcessEnv,
 ): Promise<{
   proc: ChildProcessByStdio<null, Readable, Readable>;
   spawnCommand: TerminalSpawnCommand;
@@ -546,7 +552,7 @@ async function spawnTerminalProcess(
   const directCommand = buildTerminalSpawnCommand(params.command, params.args);
   try {
     return {
-      proc: await spawnAndWait(directCommand, params, defaultCwd),
+      proc: await spawnAndWait(directCommand, params, defaultCwd, environment),
       spawnCommand: directCommand,
     };
   } catch (error) {
@@ -558,7 +564,7 @@ async function spawnTerminalProcess(
       throw error;
     }
     return {
-      proc: await spawnAndWait(fallbackCommand, params, defaultCwd),
+      proc: await spawnAndWait(fallbackCommand, params, defaultCwd, environment),
       spawnCommand: fallbackCommand,
     };
   }
@@ -568,11 +574,15 @@ async function spawnAndWait(
   spawnCommand: TerminalSpawnCommand,
   params: CreateTerminalRequest,
   defaultCwd: string,
+  environment: NodeJS.ProcessEnv,
 ): Promise<ChildProcessByStdio<null, Readable, Readable>> {
+  const cwd = resolveContainedTerminalCwd(params.cwd, defaultCwd);
   const spawnOptions = buildTerminalSpawnOptions(
     spawnCommand.command,
-    params.cwd ?? defaultCwd,
+    cwd,
     params.env,
+    process.platform,
+    environment,
   );
   if (spawnCommand.killProcessGroup) {
     spawnOptions.detached = true;
@@ -584,6 +594,24 @@ async function spawnAndWait(
   const proc = spawn(spawnCommand.command, spawnCommand.args, spawnOptions);
   await waitForSpawn(proc);
   return proc;
+}
+
+function resolveContainedTerminalCwd(
+  requestedCwd: string | null | undefined,
+  root: string,
+): string {
+  const resolvedRoot = fs.realpathSync.native(root);
+  const requested = requestedCwd ?? resolvedRoot;
+  const resolvedCandidate = fs.realpathSync.native(path.resolve(resolvedRoot, requested));
+  if (
+    resolvedCandidate !== resolvedRoot &&
+    !resolvedCandidate.startsWith(`${resolvedRoot}${path.sep}`)
+  ) {
+    throw new PermissionDeniedError(
+      "terminal/create cwd must stay within the configured workspace",
+    );
+  }
+  return resolvedCandidate;
 }
 
 function isNotFoundSpawnError(error: unknown): boolean {

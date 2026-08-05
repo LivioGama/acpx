@@ -1,6 +1,93 @@
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import type { AcpClientOptions } from "../types.js";
 
 const AUTH_ENV_PREFIX = "ACPX_AUTH_";
+
+const TERMINAL_ENV_ALLOWLIST = new Set([
+  "PATH",
+  "TERM",
+  "COLORTERM",
+  "LANG",
+  "TZ",
+  "TMPDIR",
+  "TMP",
+  "TEMP",
+  "SYSTEMROOT",
+  "WINDIR",
+  "COMSPEC",
+  "PATHEXT",
+  "NUMBER_OF_PROCESSORS",
+]);
+
+const TERMINAL_HOME_ENV_KEYS = new Set(["HOME", "USERPROFILE", "HOMEDRIVE", "HOMEPATH"]);
+
+const TERMINAL_ISOLATED_ENV_KEYS = new Set([
+  "XDG_CONFIG_HOME",
+  "XDG_CACHE_HOME",
+  "XDG_DATA_HOME",
+  "APPDATA",
+  "LOCALAPPDATA",
+  "SSH_AUTH_SOCK",
+  "GIT_ASKPASS",
+  "GIT_CONFIG_GLOBAL",
+  "AWS_SHARED_CREDENTIALS_FILE",
+  "AWS_CONFIG_FILE",
+]);
+
+function isTerminalEnvAllowed(key: string): boolean {
+  return TERMINAL_ENV_ALLOWLIST.has(protectedEnvKey(key)) || /^LC_[A-Z0-9_]+$/u.test(key);
+}
+
+function isSensitiveTerminalEnvKey(key: string): boolean {
+  const normalized = protectedEnvKey(key);
+  return (
+    normalized.startsWith(AUTH_ENV_PREFIX) ||
+    TERMINAL_HOME_ENV_KEYS.has(normalized) ||
+    TERMINAL_ISOLATED_ENV_KEYS.has(normalized) ||
+    normalized.endsWith("_HOME") ||
+    normalized === "LOGNAME" ||
+    /(?:^|_)(?:API_KEY|API_TOKEN|ACCESS_TOKEN|AUTH_TOKEN|OAUTH_TOKEN|SECRET|PASSWORD|CREDENTIAL)$/u.test(
+      normalized,
+    )
+  );
+}
+
+function terminalHome(): string {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "acpx-terminal-home-"));
+  fs.mkdirSync(path.join(home, ".config"), { recursive: true });
+  fs.mkdirSync(path.join(home, ".cache"), { recursive: true });
+  fs.mkdirSync(path.join(home, ".local", "share"), { recursive: true });
+  return home;
+}
+
+/**
+ * Builds the environment for agent-requested terminal callbacks. It deliberately
+ * does not inherit ambient provider credentials or credential homes; those stay
+ * available only to the ACP adapter process built by buildAgentSpawnOptions.
+ */
+export function buildTerminalEnvironment(): NodeJS.ProcessEnv {
+  const home = terminalHome();
+  const env: NodeJS.ProcessEnv = {
+    HOME: home,
+    XDG_CONFIG_HOME: path.join(home, ".config"),
+    XDG_CACHE_HOME: path.join(home, ".cache"),
+    XDG_DATA_HOME: path.join(home, ".local", "share"),
+  };
+
+  for (const [key, value] of Object.entries(process.env)) {
+    if (typeof value !== "string" || isSensitiveTerminalEnvKey(key) || !isTerminalEnvAllowed(key)) {
+      continue;
+    }
+    env[key] = value;
+  }
+  return env;
+}
+
+export function isAllowedTerminalEnvironmentOverride(key: string): boolean {
+  return !isSensitiveTerminalEnvKey(key);
+}
 
 function toEnvToken(value: string): string {
   return value
